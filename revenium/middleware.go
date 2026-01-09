@@ -22,6 +22,7 @@ type ReveniumAnthropic struct {
 	config   *Config
 	provider Provider
 	mu       sync.RWMutex
+	wg       sync.WaitGroup // WaitGroup for tracking in-flight metering goroutines
 }
 
 var (
@@ -157,11 +158,20 @@ func (r *ReveniumAnthropic) Messages() *MessagesInterface {
 		client:   r.client,
 		config:   r.config,
 		provider: r.provider,
+		wg:       &r.wg,
 	}
 }
 
-// Close closes the client and cleans up resources
+// Flush waits for all in-flight metering goroutines to complete.
+// Call this before shutdown to ensure all metering data is sent.
+func (r *ReveniumAnthropic) Flush() {
+	r.wg.Wait()
+}
+
+// Close closes the client and cleans up resources.
+// It waits for all in-flight metering goroutines to complete before returning.
 func (r *ReveniumAnthropic) Close() error {
+	r.Flush() // Wait for all metering goroutines to complete
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -174,6 +184,7 @@ type MessagesInterface struct {
 	client   anthropic.Client
 	config   *Config
 	provider Provider
+	wg       *sync.WaitGroup // Shared WaitGroup from ReveniumAnthropic
 }
 
 // CreateMessage creates a message with automatic metering
@@ -235,8 +246,16 @@ func (m *MessagesInterface) createMessageAnthropic(ctx context.Context, params a
 	// Calculate duration
 	duration := time.Since(startTime)
 
-	// Send metering data asynchronously (fire-and-forget)
-	go m.sendMeteringData(ctx, resp, metadata, false, duration, "Anthropic", startTime)
+	// Send metering data asynchronously (fire-and-forget) with WaitGroup tracking
+	if m.wg != nil {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.sendMeteringData(ctx, resp, metadata, false, duration, "Anthropic", startTime)
+		}()
+	} else {
+		go m.sendMeteringData(ctx, resp, metadata, false, duration, "Anthropic", startTime)
+	}
 
 	return resp, nil
 }
@@ -287,8 +306,16 @@ func (m *MessagesInterface) createMessageBedrock(ctx context.Context, params ant
 	// Calculate duration
 	duration := time.Since(startTime)
 
-	// Send metering data asynchronously (fire-and-forget)
-	go m.sendMeteringData(ctx, resp, metadata, false, duration, "AWS", startTime)
+	// Send metering data asynchronously (fire-and-forget) with WaitGroup tracking
+	if m.wg != nil {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.sendMeteringData(ctx, resp, metadata, false, duration, "AWS", startTime)
+		}()
+	} else {
+		go m.sendMeteringData(ctx, resp, metadata, false, duration, "AWS", startTime)
+	}
 
 	return resp, nil
 }
@@ -590,8 +617,8 @@ func (sw *StreamingWrapper) Close() error {
 		timeToFirstToken = sw.firstTokenTime.Sub(sw.startTime)
 	}
 
-	// Send metering data asynchronously (fire-and-forget)
-	go func() {
+	// Send metering data asynchronously (fire-and-forget) with WaitGroup tracking
+	meteringFunc := func() {
 		defer func() {
 			if r := recover(); r != nil {
 				Error("Streaming metering goroutine panic: %v", r)
@@ -656,7 +683,18 @@ func (sw *StreamingWrapper) Close() error {
 				Error("Failed to send streaming metering data: %v", err)
 			}
 		}
-	}()
+	}
+
+	// Launch goroutine with WaitGroup tracking if available
+	if sw.messagesAPI != nil && sw.messagesAPI.wg != nil {
+		sw.messagesAPI.wg.Add(1)
+		go func() {
+			defer sw.messagesAPI.wg.Done()
+			meteringFunc()
+		}()
+	} else {
+		go meteringFunc()
+	}
 
 	return err
 }
@@ -903,7 +941,7 @@ func buildMeteringPayload(resp *anthropic.Message, metadata map[string]interface
 		"requestTime":             requestTimeISO,
 		"completionStartTime":     completionStartTimeISO,
 		"timeToFirstToken":        int64(0), // Will be overridden for streaming
-		"middlewareSource":        "revenium-middleware-anthropic-go",
+		"middlewareSource":        GetMiddlewareSource(),
 	}
 
 	// Add metadata fields if they exist (based on testing with Revenium API)

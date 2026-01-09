@@ -30,11 +30,12 @@ go mod init my-claude-app
 ### Step 2: Install Dependencies
 
 ```bash
+go get github.com/anthropics/anthropic-sdk-go
 go get github.com/revenium/revenium-middleware-anthropic-go
 go mod tidy
 ```
 
-This will automatically download the middleware and all its dependencies (including the Anthropic SDK).
+This installs both the Anthropic SDK and the Revenium middleware.
 
 ### Step 3: Create Environment File
 
