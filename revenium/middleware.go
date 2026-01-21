@@ -225,6 +225,13 @@ func (m *MessagesInterface) createMessageAnthropic(ctx context.Context, params a
 	// Record start time for duration calculation
 	startTime := time.Now()
 
+	// Extract prompts if capture is enabled
+	var promptData *PromptData
+	if m.config.CapturePrompts {
+		data := ExtractPromptsFromParams(params)
+		promptData = &data
+	}
+
 	// Convert Bedrock ARN to Anthropic model if needed
 	// This handles the case where Bedrock is disabled but user passes a Bedrock ARN
 	originalModel := string(params.Model)
@@ -246,15 +253,22 @@ func (m *MessagesInterface) createMessageAnthropic(ctx context.Context, params a
 	// Calculate duration
 	duration := time.Since(startTime)
 
+	// Extract response content if prompt capture is enabled
+	if promptData != nil && m.config.CapturePrompts {
+		responseData := ExtractResponseContent(resp, promptData.PromptsTruncated)
+		promptData.OutputResponse = responseData.OutputResponse
+		promptData.PromptsTruncated = responseData.PromptsTruncated
+	}
+
 	// Send metering data asynchronously (fire-and-forget) with WaitGroup tracking
 	if m.wg != nil {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			m.sendMeteringData(ctx, resp, metadata, false, duration, "Anthropic", startTime)
+			m.sendMeteringDataWithPrompts(ctx, resp, metadata, false, duration, "Anthropic", startTime, &params, promptData)
 		}()
 	} else {
-		go m.sendMeteringData(ctx, resp, metadata, false, duration, "Anthropic", startTime)
+		go m.sendMeteringDataWithPrompts(ctx, resp, metadata, false, duration, "Anthropic", startTime, &params, promptData)
 	}
 
 	return resp, nil
@@ -264,6 +278,13 @@ func (m *MessagesInterface) createMessageAnthropic(ctx context.Context, params a
 func (m *MessagesInterface) createMessageBedrock(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}) (*anthropic.Message, error) {
 	// Record start time for duration calculation
 	startTime := time.Now()
+
+	// Extract prompts if capture is enabled
+	var promptData *PromptData
+	if m.config.CapturePrompts {
+		data := ExtractPromptsFromParams(params)
+		promptData = &data
+	}
 
 	// Create Bedrock adapter
 	bedrockAdapter, err := NewBedrockAdapter(m.config)
@@ -306,15 +327,22 @@ func (m *MessagesInterface) createMessageBedrock(ctx context.Context, params ant
 	// Calculate duration
 	duration := time.Since(startTime)
 
+	// Extract response content if prompt capture is enabled
+	if promptData != nil && m.config.CapturePrompts {
+		responseData := ExtractResponseContent(resp, promptData.PromptsTruncated)
+		promptData.OutputResponse = responseData.OutputResponse
+		promptData.PromptsTruncated = responseData.PromptsTruncated
+	}
+
 	// Send metering data asynchronously (fire-and-forget) with WaitGroup tracking
 	if m.wg != nil {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			m.sendMeteringData(ctx, resp, metadata, false, duration, "AWS", startTime)
+			m.sendMeteringDataWithPrompts(ctx, resp, metadata, false, duration, "AWS", startTime, &params, promptData)
 		}()
 	} else {
-		go m.sendMeteringData(ctx, resp, metadata, false, duration, "AWS", startTime)
+		go m.sendMeteringDataWithPrompts(ctx, resp, metadata, false, duration, "AWS", startTime, &params, promptData)
 	}
 
 	return resp, nil
@@ -322,6 +350,13 @@ func (m *MessagesInterface) createMessageBedrock(ctx context.Context, params ant
 
 // createMessageStreamAnthropic creates a streaming message using Anthropic native API
 func (m *MessagesInterface) createMessageStreamAnthropic(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}) (interface{}, error) {
+	// Extract prompts if capture is enabled
+	var promptData *PromptData
+	if m.config.CapturePrompts {
+		data := ExtractPromptsFromParams(params)
+		promptData = &data
+	}
+
 	// Convert Bedrock ARN to Anthropic model if needed
 	// This handles the case where Bedrock is disabled but user passes a Bedrock ARN
 	originalModel := string(params.Model)
@@ -360,6 +395,8 @@ func (m *MessagesInterface) createMessageStreamAnthropic(ctx context.Context, pa
 		messagesAPI: m,
 		model:       string(params.Model),
 		provider:    "Anthropic",
+		params:      &params,
+		promptData:  promptData,
 	}
 
 	// Estimate input tokens (this is an approximation)
@@ -372,6 +409,13 @@ func (m *MessagesInterface) createMessageStreamAnthropic(ctx context.Context, pa
 
 // createMessageStreamBedrock creates a streaming message using AWS Bedrock with fallback to Anthropic
 func (m *MessagesInterface) createMessageStreamBedrock(ctx context.Context, params anthropic.MessageNewParams, metadata map[string]interface{}) (interface{}, error) {
+	// Extract prompts if capture is enabled
+	var promptData *PromptData
+	if m.config.CapturePrompts {
+		data := ExtractPromptsFromParams(params)
+		promptData = &data
+	}
+
 	// Create Bedrock adapter
 	bedrockAdapter, err := NewBedrockAdapter(m.config)
 	if err != nil {
@@ -433,6 +477,8 @@ func (m *MessagesInterface) createMessageStreamBedrock(ctx context.Context, para
 		messagesAPI: m,
 		model:       string(params.Model),
 		provider:    "AWS",
+		params:      &params,
+		promptData:  promptData,
 	}
 
 	// Estimate input tokens for Bedrock
@@ -457,8 +503,13 @@ type StreamingWrapper struct {
 	outputTokens int
 	totalTokens  int
 	model        string
-	provider     string // Provider name (Anthropic or AWS)
-	stopReason   string // Stop reason from streaming events
+	provider     string                        // Provider name (Anthropic or AWS)
+	stopReason   string                        // Stop reason from streaming events
+	params       *anthropic.MessageNewParams   // Original request params for vision detection
+
+	// Prompt capture tracking
+	promptData         *PromptData
+	accumulatedContent string
 }
 
 // Next returns the next event from the stream
@@ -514,6 +565,13 @@ func (sw *StreamingWrapper) Current() interface{} {
 					if sw.firstTokenTime == nil {
 						now := time.Now()
 						sw.firstTokenTime = &now
+					}
+
+					// Accumulate content for prompt capture (if enabled)
+					if sw.promptData != nil {
+						if text := extractTextFromContentEvent(event); text != "" {
+							sw.accumulatedContent += text
+						}
 					}
 				}
 
@@ -659,7 +717,7 @@ func (sw *StreamingWrapper) Close() error {
 		}
 
 		// Use the same payload builder as non-streaming
-		payload := buildMeteringPayload(mockResp, sw.metadata, true, duration, provider, startTime)
+		payload := buildMeteringPayload(mockResp, sw.metadata, true, duration, provider, startTime, sw.params)
 
 		// Override streaming-specific fields with actual timing data
 		payload["timeToFirstToken"] = timeToFirstToken.Milliseconds()
@@ -675,6 +733,31 @@ func (sw *StreamingWrapper) Close() error {
 		payload["totalTokenCount"] = totalTokens
 		if model != "" {
 			payload["model"] = model
+		}
+
+		// Add prompt capture data if enabled
+		sw.mu.Lock()
+		promptData := sw.promptData
+		accumulatedContent := sw.accumulatedContent
+		sw.mu.Unlock()
+
+		if promptData != nil {
+			// Add input prompts
+			if promptData.SystemPrompt != "" {
+				payload["systemPrompt"] = promptData.SystemPrompt
+			}
+			if promptData.InputMessages != "" {
+				payload["inputMessages"] = promptData.InputMessages
+			}
+
+			// Extract streaming response content
+			responseData := ExtractStreamingResponseContent(accumulatedContent, promptData.PromptsTruncated)
+			if responseData.OutputResponse != "" {
+				payload["outputResponse"] = responseData.OutputResponse
+			}
+			if responseData.PromptsTruncated {
+				payload["promptsTruncated"] = true
+			}
 		}
 
 		// Send to Revenium API with retry logic
@@ -736,6 +819,45 @@ func isContentEvent(event interface{}) bool {
 	}
 
 	return false
+}
+
+// extractTextFromContentEvent extracts text from a content event for prompt capture
+func extractTextFromContentEvent(event interface{}) string {
+	if event == nil {
+		return ""
+	}
+
+	// Use reflection to get the Delta.Text field
+	eventValue := reflect.ValueOf(event)
+	if eventValue.Kind() == reflect.Ptr {
+		eventValue = eventValue.Elem()
+	}
+
+	// Get Delta field
+	deltaField := eventValue.FieldByName("Delta")
+	if !deltaField.IsValid() || deltaField.IsZero() {
+		return ""
+	}
+
+	deltaValue := deltaField.Interface()
+	if deltaValue == nil {
+		return ""
+	}
+
+	deltaReflect := reflect.ValueOf(deltaValue)
+	if deltaReflect.Kind() == reflect.Ptr {
+		deltaReflect = deltaReflect.Elem()
+	}
+
+	// Get Text field from Delta
+	textField := deltaReflect.FieldByName("Text")
+	if textField.IsValid() {
+		if text, ok := textField.Interface().(string); ok {
+			return text
+		}
+	}
+
+	return ""
 }
 
 // isMessageDeltaEvent checks if an event is a message_delta event containing usage data
@@ -836,7 +958,12 @@ func estimateInputTokens(params anthropic.MessageNewParams) int {
 
 // sendMeteringData sends metering data in the background (fire-and-forget)
 // NOTE: This function is already called with 'go' from the caller, so it should NOT launch another goroutine
-func (m *MessagesInterface) sendMeteringData(ctx context.Context, resp *anthropic.Message, metadata map[string]interface{}, isStreamed bool, duration time.Duration, provider string, startTime time.Time) {
+func (m *MessagesInterface) sendMeteringData(ctx context.Context, resp *anthropic.Message, metadata map[string]interface{}, isStreamed bool, duration time.Duration, provider string, startTime time.Time, params *anthropic.MessageNewParams) {
+	m.sendMeteringDataWithPrompts(ctx, resp, metadata, isStreamed, duration, provider, startTime, params, nil)
+}
+
+// sendMeteringDataWithPrompts sends metering data with optional prompt capture
+func (m *MessagesInterface) sendMeteringDataWithPrompts(ctx context.Context, resp *anthropic.Message, metadata map[string]interface{}, isStreamed bool, duration time.Duration, provider string, startTime time.Time, params *anthropic.MessageNewParams, promptData *PromptData) {
 	defer func() {
 		if r := recover(); r != nil {
 			Error("Metering goroutine panic: %v", r)
@@ -844,7 +971,12 @@ func (m *MessagesInterface) sendMeteringData(ctx context.Context, resp *anthropi
 	}()
 
 	// Build metering payload using helper function
-	payload := buildMeteringPayload(resp, metadata, isStreamed, duration, provider, startTime)
+	payload := buildMeteringPayload(resp, metadata, isStreamed, duration, provider, startTime, params)
+
+	// Add prompt data if available
+	if promptData != nil {
+		AddPromptDataToPayload(payload, *promptData)
+	}
 
 	// Send to Revenium API with retry logic
 	if err := m.sendMeteringWithRetry(payload); err != nil {
@@ -902,7 +1034,7 @@ func normalizeProviderName(provider string) string {
 }
 
 // buildMeteringPayload builds a metering payload, matching Node.js format exactly
-func buildMeteringPayload(resp *anthropic.Message, metadata map[string]interface{}, isStreamed bool, duration time.Duration, provider string, startTime time.Time) map[string]interface{} {
+func buildMeteringPayload(resp *anthropic.Message, metadata map[string]interface{}, isStreamed bool, duration time.Duration, provider string, startTime time.Time, params *anthropic.MessageNewParams) map[string]interface{} {
 	// Calculate actual timestamps based on request timing
 	requestTimeISO := startTime.Format(time.RFC3339)
 	responseTime := startTime.Add(duration)
@@ -1040,6 +1172,18 @@ func buildMeteringPayload(resp *anthropic.Message, metadata map[string]interface
 		if errorReason, ok := metadata["errorReason"]; ok {
 			payload["errorReason"] = errorReason
 			payload["stopReason"] = "ERROR" // Override stop reason if error occurred
+		}
+	}
+
+	// Detect vision content in request parameters
+	if params != nil {
+		visionResult := DetectVisionContent(*params)
+		if visionResult.HasVisionContent {
+			payload["hasVisionContent"] = true
+			// Add vision attributes
+			if attrs := BuildVisionAttributes(visionResult); attrs != nil {
+				payload["attributes"] = attrs
+			}
 		}
 	}
 
