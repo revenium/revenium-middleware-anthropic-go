@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"reflect"
 	"time"
 
@@ -124,7 +125,12 @@ func main() {
 	fmt.Println("\n=== Verification Info ===")
 	fmt.Printf("Trace ID:       %s\n", traceID)
 	fmt.Printf("Transaction ID: %s\n", transactionID)
-	fmt.Printf("\nTrace URL: https://ai.dev.hcapp.io/traces?traceId=%s\n", traceID)
+	// Use REVENIUM_UI_URL env var or default to production
+	uiURL := os.Getenv("REVENIUM_UI_URL")
+	if uiURL == "" {
+		uiURL = "https://app.revenium.ai"
+	}
+	fmt.Printf("\nTrace URL: %s/traces?traceId=%s\n", uiURL, traceID)
 
 	// Print all metadata sent for comparison
 	fmt.Println("\n=== Metadata Sent (for verification) ===")
