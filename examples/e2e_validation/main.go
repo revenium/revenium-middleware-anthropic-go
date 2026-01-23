@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -130,6 +131,7 @@ func main() {
 	if uiURL == "" {
 		uiURL = "https://app.revenium.ai"
 	}
+	uiURL = strings.TrimSuffix(uiURL, "/")
 	fmt.Printf("\nTrace URL: %s/traces?traceId=%s\n", uiURL, traceID)
 
 	// Print all metadata sent for comparison
