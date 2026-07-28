@@ -1,3 +1,4 @@
+// Deprecated: This module has moved to github.com/revenium/revenium-go-sdk/anthropic.
 module github.com/revenium/revenium-middleware-anthropic-go
 
 go 1.23.0
@@ -31,4 +32,14 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
+
+retract (
+	v1.0.7 // Deprecation tombstone: use revenium-go-sdk/anthropic instead.
+	v1.0.6 // Consolidated into revenium-go-sdk/anthropic.
+	v1.0.5 // Consolidated into revenium-go-sdk/anthropic.
+	v1.0.4 // Consolidated into revenium-go-sdk/anthropic.
+	v1.0.3 // Consolidated into revenium-go-sdk/anthropic.
+	v1.0.2 // Consolidated into revenium-go-sdk/anthropic.
+	v1.0.1 // Consolidated into revenium-go-sdk/anthropic.
 )
